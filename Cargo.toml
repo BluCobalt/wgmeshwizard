@@ -18,6 +18,9 @@ toml = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "wayland"] }
 

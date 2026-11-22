@@ -4252,6 +4252,7 @@ dependencies = [
  "base64",
  "csv",
  "eframe",
+ "libc",
  "rand_core",
  "rfd",
  "rust-i18n",
