@@ -1,5 +1,7 @@
 # WireGuard Mesh Wizard
 
+![Screenshot of Wireguard Mesh Wizard, demonstrating 4 nodes with arrows that represent individual links between them.](https://github.com/BluCobalt/wgmeshwizard/raw/refs/heads/master/res/README.png)
+
 A gui editor for WireGuard mesh networks, written in Rust with
 [egui](https://github.com/emilk/egui).
 
