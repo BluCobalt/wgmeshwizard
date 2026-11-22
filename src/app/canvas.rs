@@ -243,6 +243,14 @@ pub(super) fn paint_node(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ConnectionInteraction {
+    pub clicked: bool,
+    pub double_clicked: bool,
+    pub delete_requested: bool,
+    pub disable_requested: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint_connection(
     ui: &Ui,
@@ -255,16 +263,17 @@ pub(super) fn paint_connection(
     connection: &Connection,
     selected: bool,
     highlighted: bool,
+    dimmed: bool,
     zoom: f32,
     occupied_labels: &mut Vec<Rect>,
     colors: &CanvasColors,
-) -> bool {
+) -> ConnectionInteraction {
     let from_center = from_rect.center();
     let to_center = to_rect.center();
     let delta = to_center - from_center;
     let distance = delta.length();
     if distance < 1.0 {
-        return false;
+        return ConnectionInteraction::default();
     }
 
     let direction = delta / distance;
@@ -286,6 +295,11 @@ pub(super) fn paint_connection(
         (colors.selected_accent, (2.6 * zoom).max(1.4))
     } else {
         (colors.edge, (1.6 * zoom).max(1.0))
+    };
+    let line_color = if dimmed {
+        line_color.gamma_multiply(0.22)
+    } else {
+        line_color
     };
 
     if connection.enabled {
@@ -328,7 +342,7 @@ pub(super) fn paint_connection(
     }
 
     if zoom < 0.32 {
-        return false;
+        return ConnectionInteraction::default();
     }
 
     let no_endpoint = tr!("ui.paint_connection.no_endpoint");
@@ -367,26 +381,27 @@ pub(super) fn paint_connection(
     );
     let hovered = response.hovered();
 
+    let label_opacity = if dimmed { 0.32 } else { 1.0 };
     let background = if selected {
         colors.label_bg_selected
     } else if hovered {
         colors.label_bg_hovered
     } else {
         colors.label_bg
-    };
+    }
+    .gamma_multiply(label_opacity);
+    let border_color = if selected {
+        colors.selected_accent
+    } else {
+        colors.label_border
+    }
+    .gamma_multiply(label_opacity);
     let radius = CornerRadius::same((6.0 * zoom).clamp(2.0, 8.0) as u8);
     painter.rect_filled(label_rect, radius, background);
     painter.rect_stroke(
         label_rect,
         radius,
-        Stroke::new(
-            (1.2 * zoom).max(1.0),
-            if selected {
-                colors.selected_accent
-            } else {
-                colors.label_border
-            },
-        ),
+        Stroke::new((1.2 * zoom).max(1.0), border_color),
         StrokeKind::Inside,
     );
 
@@ -396,21 +411,40 @@ pub(super) fn paint_connection(
         colors.label_text_selected
     } else {
         colors.label_text
-    };
+    }
+    .gamma_multiply(if dimmed { 0.45 } else { 1.0 });
     painter.galley(
         label_rect.center() - galley.size() / 2.0,
         galley,
         text_color,
     );
 
-    response
-        .on_hover_text(tr!(
-            "ui.paint_connection.from_to_endpoint_endpoint",
-            from = from_name,
-            to = to_name,
-            endpoint = endpoint.unwrap_or("none")
-        ))
-        .clicked()
+    let response = response.on_hover_text(tr!(
+        "ui.paint_connection.from_to_endpoint_endpoint",
+        from = from_name,
+        to = to_name,
+        endpoint = endpoint.unwrap_or("none")
+    ));
+    let mut delete_requested = false;
+    let mut disable_requested = false;
+    response.context_menu(|ui| {
+        if connection.enabled && ui.button(tr!("ui.canvas.disable_connection")).clicked() {
+            disable_requested = true;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tr!("ui.canvas.delete_connection")).clicked() {
+            delete_requested = true;
+            ui.close();
+        }
+    });
+
+    ConnectionInteraction {
+        clicked: response.clicked(),
+        double_clicked: response.double_clicked(),
+        delete_requested,
+        disable_requested,
+    }
 }
 
 pub(super) fn sample_bezier(points: [Pos2; 4], t: f32) -> Pos2 {

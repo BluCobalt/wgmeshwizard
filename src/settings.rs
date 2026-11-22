@@ -15,6 +15,11 @@ pub const SETTINGS_VERSION: u32 = 1;
 /// Optional path override, useful for portable installs and testing.
 pub const SETTINGS_ENV: &str = "WGMESHWIZARD_SETTINGS";
 
+/// Default gap, in world units, left between node cards by auto-arrange.
+pub const DEFAULT_ARRANGE_SPACING: f32 = 60.0;
+pub const MIN_ARRANGE_SPACING: f32 = 0.0;
+pub const MAX_ARRANGE_SPACING: f32 = 1000.0;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -73,12 +78,15 @@ impl Default for LanguageSettings {
 pub struct MeshViewSettings {
     /// `circle`, `square`, `cards`, or `rows`.
     pub arrange_layout: String,
+    /// Gap in world units between node cards when auto-arranging.
+    pub arrange_spacing: f32,
 }
 
 impl Default for MeshViewSettings {
     fn default() -> Self {
         Self {
             arrange_layout: "circle".to_owned(),
+            arrange_spacing: DEFAULT_ARRANGE_SPACING,
         }
     }
 }
@@ -118,6 +126,14 @@ impl Settings {
             _ => "circle",
         }
         .to_owned();
+
+        if !self.mesh_view.arrange_spacing.is_finite() {
+            self.mesh_view.arrange_spacing = DEFAULT_ARRANGE_SPACING;
+        }
+        self.mesh_view.arrange_spacing = self
+            .mesh_view
+            .arrange_spacing
+            .clamp(MIN_ARRANGE_SPACING, MAX_ARRANGE_SPACING);
 
         self
     }
@@ -245,6 +261,7 @@ mod tests {
             },
             mesh_view: MeshViewSettings {
                 arrange_layout: "cards".to_owned(),
+                arrange_spacing: 125.0,
             },
         };
 
@@ -275,7 +292,8 @@ mod tests {
              [language]\n\
              locale = \"  \"\n\
              [mesh_view]\n\
-             arrange_layout = \"hexagon\"\n",
+             arrange_layout = \"hexagon\"\n\
+             arrange_spacing = 9999.0\n",
         )
         .unwrap();
 
@@ -285,6 +303,22 @@ mod tests {
         assert_eq!(settings.appearance.ui_scale, 2.0);
         assert_eq!(settings.language.locale, "system");
         assert_eq!(settings.mesh_view.arrange_layout, "circle");
+        assert_eq!(settings.mesh_view.arrange_spacing, MAX_ARRANGE_SPACING);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn missing_arrange_spacing_uses_the_default() {
+        let path = temp_path("spacing-default");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "version = 1\n[mesh_view]\narrange_layout = \"rows\"\n",
+        )
+        .unwrap();
+
+        let settings = load(&path).unwrap().unwrap();
+        assert_eq!(settings.mesh_view.arrange_spacing, DEFAULT_ARRANGE_SPACING);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

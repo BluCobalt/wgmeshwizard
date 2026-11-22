@@ -30,6 +30,8 @@ const NODE_HEIGHT: f32 = 88.0;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 2.5;
 const FIELD_WIDTH: f32 = 215.0;
+const HISTORY_LIMIT: usize = 100;
+const HISTORY_GROUP_WINDOW: Duration = Duration::from_millis(450);
 
 const CANVAS_BG: Color32 = Color32::from_rgb(12, 16, 25);
 const GRID_MINOR: Color32 = Color32::from_rgb(24, 32, 47);
@@ -231,6 +233,23 @@ enum Selection {
     },
 }
 
+/// Connections attached to a hovered or selected host (or that are themselves
+/// selected) are highlighted and painted after every other connection.
+fn connection_is_highlighted(
+    connection: &crate::model::Connection,
+    selection: &Selection,
+    hovered_host: Option<u64>,
+) -> bool {
+    matches!(
+        selection,
+        Selection::Connection { from, to }
+            if *from == connection.from && *to == connection.to
+    ) || hovered_host == Some(connection.from)
+        || hovered_host == Some(connection.to)
+        || selection.contains_host(connection.from)
+        || selection.contains_host(connection.to)
+}
+
 impl Selection {
     fn hosts(&self) -> &[u64] {
         match self {
@@ -270,6 +289,128 @@ impl Selection {
         if empty {
             *self = Self::None;
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusRequest {
+    HostName(u64),
+    ConnectionEndpoint { from: u64, to: u64 },
+}
+
+fn host_name_field_id(id: u64) -> egui::Id {
+    egui::Id::unique(("host_name_field", id))
+}
+
+fn host_endpoint_field_id(id: u64) -> egui::Id {
+    egui::Id::unique(("host_endpoint_field", id))
+}
+
+fn connection_endpoint_field_id(from: u64, to: u64) -> egui::Id {
+    egui::Id::unique(("connection_endpoint_field", from, to))
+}
+
+/// Snapshot-based undo/redo history for the mesh. Changes made close together
+/// (for example, typing or a drag) are grouped into one undo step.
+struct MeshHistory {
+    undo: Vec<crate::model::Mesh>,
+    redo: Vec<crate::model::Mesh>,
+    baseline: crate::model::Mesh,
+    pending: Option<crate::model::Mesh>,
+    changed_at: Option<Instant>,
+}
+
+impl MeshHistory {
+    fn new(mesh: &crate::model::Mesh) -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            baseline: mesh.clone(),
+            pending: None,
+            changed_at: None,
+        }
+    }
+
+    fn reset(&mut self, mesh: &crate::model::Mesh) {
+        self.undo.clear();
+        self.redo.clear();
+        self.baseline = mesh.clone();
+        self.pending = None;
+        self.changed_at = None;
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.undo.is_empty() || self.pending.is_some()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Observe the current mesh. Returns true when a pending group was
+    /// committed, which is when the toolbar's enabled state needs refreshing.
+    fn observe(&mut self, mesh: &crate::model::Mesh, now: Instant) -> bool {
+        if mesh != &self.baseline {
+            if self.pending.is_none() {
+                self.pending = Some(self.baseline.clone());
+            }
+            self.baseline = mesh.clone();
+            self.changed_at = Some(now);
+            self.redo.clear();
+            return false;
+        }
+
+        if let Some(changed_at) = self.changed_at
+            && now.saturating_duration_since(changed_at) >= HISTORY_GROUP_WINDOW
+        {
+            self.commit_pending(mesh);
+            return true;
+        }
+        false
+    }
+
+    fn push_undo(&mut self, mesh: crate::model::Mesh) {
+        self.undo.push(mesh);
+        if self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    fn commit_pending(&mut self, mesh: &crate::model::Mesh) {
+        if let Some(previous) = self.pending.take()
+            && &previous != mesh
+        {
+            self.push_undo(previous);
+        }
+        self.changed_at = None;
+    }
+
+    fn undo(&mut self, mesh: &mut crate::model::Mesh) -> bool {
+        self.commit_pending(mesh);
+        let Some(previous) = self.undo.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(mesh, previous);
+        self.redo.push(current);
+        self.baseline = mesh.clone();
+        self.changed_at = None;
+        true
+    }
+
+    fn redo(&mut self, mesh: &mut crate::model::Mesh) -> bool {
+        self.commit_pending(mesh);
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(mesh, next);
+        self.push_undo(current);
+        self.baseline = mesh.clone();
+        self.changed_at = None;
+        true
     }
 }
 
@@ -317,7 +458,10 @@ pub struct MeshWizardApp {
     selection: Selection,
     camera: Camera,
     fit_pending: bool,
+    focus_request: Option<FocusRequest>,
+    history: MeshHistory,
     status: String,
+    status_time: Option<String>,
     status_is_error: bool,
     show_settings: bool,
     settings_tab: SettingsTab,
@@ -325,6 +469,7 @@ pub struct MeshWizardApp {
     ui_scale: f32,
     theme_mode: ThemeMode,
     mesh_shape: MeshShape,
+    arrange_spacing: f32,
     language: String,
     settings_path: PathBuf,
     settings_dirty_since: Option<Instant>,
@@ -374,15 +519,17 @@ impl MeshWizardApp {
             ThemeMode::from_storage(&stored_settings.appearance.theme).unwrap_or_default();
         let mesh_shape =
             MeshShape::from_storage(&stored_settings.mesh_view.arrange_layout).unwrap_or_default();
+        let arrange_spacing = stored_settings.mesh_view.arrange_spacing;
         let language = stored_settings.language.locale.clone();
 
         cc.egui_ctx.set_zoom_factor(ui_scale);
         cc.egui_ctx.set_theme(theme_mode.preference());
         i18n::set_language(&language);
 
+        let initial_mesh = crate::model::Mesh::new();
         let mut app = Self {
-            mesh: crate::model::Mesh::new(),
-            saved: crate::model::Mesh::new(),
+            mesh: initial_mesh.clone(),
+            saved: initial_mesh.clone(),
             project_path: project,
             startup_prompt,
             close_prompt: false,
@@ -391,7 +538,10 @@ impl MeshWizardApp {
             selection: Selection::None,
             camera: Camera::default(),
             fit_pending: true,
+            focus_request: None,
+            history: MeshHistory::new(&initial_mesh),
             status: String::new(),
+            status_time: None,
             status_is_error: false,
             show_settings: false,
             settings_tab: SettingsTab::default(),
@@ -399,6 +549,7 @@ impl MeshWizardApp {
             ui_scale,
             theme_mode,
             mesh_shape,
+            arrange_spacing,
             language,
             settings_path,
             settings_dirty_since: None,
@@ -447,6 +598,7 @@ impl MeshWizardApp {
             },
             mesh_view: MeshViewSettings {
                 arrange_layout: self.mesh_shape.as_storage(),
+                arrange_spacing: self.arrange_spacing,
             },
         };
 
@@ -518,12 +670,14 @@ impl MeshWizardApp {
     fn close_project(&mut self) {
         self.mesh = crate::model::Mesh::new();
         self.saved = self.mesh.clone();
+        self.history.reset(&self.mesh);
         self.project_path = PathBuf::new();
         self.startup_prompt = true;
         self.close_prompt = false;
         self.close_prompt_project = false;
         self.load_dirty = false;
         self.selection = Selection::None;
+        self.focus_request = None;
         self.camera = Camera::default();
         self.fit_pending = true;
         self.show_config = false;
@@ -532,6 +686,7 @@ impl MeshWizardApp {
         self.rotate_prompt = false;
         self.rotate_prompt_just_opened = false;
         self.status.clear();
+        self.status_time = None;
         self.status_is_error = false;
     }
 
@@ -608,8 +763,10 @@ impl MeshWizardApp {
         self.project_path = path;
         self.mesh = crate::model::Mesh::new();
         self.saved = self.mesh.clone();
+        self.history.reset(&self.mesh);
         self.load_dirty = false;
         self.selection = Selection::None;
+        self.focus_request = None;
         self.camera = Camera::default();
         self.fit_pending = true;
         self.show_config = false;
@@ -659,7 +816,64 @@ impl MeshWizardApp {
 
     fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
         self.status = message.into();
+        self.status_time = Some(crate::timestamp::now_hms());
         self.status_is_error = is_error;
+    }
+
+    fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    fn undo(&mut self) {
+        if self.history.undo(&mut self.mesh) {
+            self.focus_request = None;
+            self.sanitize_selection();
+            self.set_status(tr!("ui.history.undid_the_last_change"), false);
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.history.redo(&mut self.mesh) {
+            self.focus_request = None;
+            self.sanitize_selection();
+            self.set_status(tr!("ui.history.redid_the_last_change"), false);
+        }
+    }
+
+    fn migrate_endpoint_ports(&mut self, ctx: &egui::Context) {
+        let focused = ctx.memory(|memory| memory.focused());
+        let editing_endpoint = focused.is_some_and(|focused| {
+            self.mesh
+                .hosts
+                .iter()
+                .any(|host| host_endpoint_field_id(host.id) == focused)
+        });
+        if !editing_endpoint {
+            self.mesh.migrate_endpoint_ports();
+        }
+    }
+
+    fn sanitize_selection(&mut self) {
+        let mesh = &self.mesh;
+        let empty_hosts = if let Selection::Hosts(ids) = &mut self.selection {
+            ids.retain(|id| mesh.host(*id).is_some());
+            ids.is_empty()
+        } else {
+            false
+        };
+        if empty_hosts {
+            self.selection = Selection::None;
+            return;
+        }
+        if let Selection::Connection { from, to } = self.selection
+            && self.mesh.connection(from, to).is_none()
+        {
+            self.selection = Selection::None;
+        }
     }
 
     fn load_project(&mut self, startup: bool) -> bool {
@@ -672,9 +886,11 @@ impl MeshWizardApp {
                 let count = report.mesh.hosts.len();
                 self.mesh = report.mesh;
                 self.selection = Selection::None;
+                self.focus_request = None;
                 self.fit_pending = true;
                 self.show_config = false;
                 self.saved = self.mesh.clone();
+                self.history.reset(&self.mesh);
                 self.load_dirty =
                     report.created_new || report.normalized || generated > 0 || psks_changed;
 
@@ -709,6 +925,7 @@ impl MeshWizardApp {
                 if startup {
                     self.mesh = crate::model::Mesh::new();
                     self.saved = self.mesh.clone();
+                    self.history.reset(&self.mesh);
                     self.load_dirty = false;
                 }
                 false
@@ -823,6 +1040,7 @@ impl MeshWizardApp {
             return;
         }
 
+        self.focus_request = None;
         let mut empty_selection = false;
         if let Selection::Hosts(selected) = &mut self.selection {
             selected.retain(|selected| !ids.contains(selected));
@@ -844,6 +1062,54 @@ impl MeshWizardApp {
             tr!("ui.delete_host.deleted_count", count = names.len())
         };
         self.set_status(message, false);
+    }
+
+    fn connection_names(&self, from: u64, to: u64) -> (String, String) {
+        (
+            self.mesh
+                .host(from)
+                .map(|host| host.name.clone())
+                .unwrap_or_else(|| tr!("ui.delete_host.host_id", id = from)),
+            self.mesh
+                .host(to)
+                .map(|host| host.name.clone())
+                .unwrap_or_else(|| tr!("ui.delete_host.host_id", id = to)),
+        )
+    }
+
+    fn disable_connection(&mut self, from: u64, to: u64) {
+        let (from_name, to_name) = self.connection_names(from, to);
+        if let Some(connection) = self.mesh.connection_mut(from, to)
+            && connection.enabled
+        {
+            connection.enabled = false;
+            self.set_status(
+                tr!(
+                    "ui.connection_inspector.disabled_connection",
+                    from = from_name,
+                    to = to_name
+                ),
+                false,
+            );
+        }
+    }
+
+    fn delete_connection(&mut self, from: u64, to: u64) {
+        let (from_name, to_name) = self.connection_names(from, to);
+        if self.mesh.remove_connection(from, to) {
+            self.focus_request = None;
+            if self.selection == (Selection::Connection { from, to }) {
+                self.selection = Selection::None;
+            }
+            self.set_status(
+                tr!(
+                    "ui.connection_inspector.deleted_connection",
+                    from = from_name,
+                    to = to_name
+                ),
+                false,
+            );
+        }
     }
 
     fn request_rotate_all_secrets(&mut self) {
@@ -903,8 +1169,8 @@ impl MeshWizardApp {
             return;
         }
 
-        let spacing_x = NODE_WIDTH + 70.0;
-        let spacing_y = NODE_HEIGHT + 60.0;
+        let spacing_x = NODE_WIDTH + self.arrange_spacing;
+        let spacing_y = NODE_HEIGHT + self.arrange_spacing;
         let positions = layout_positions(self.mesh_shape, count, spacing_x, spacing_y);
 
         for (index, (x, y)) in order.into_iter().zip(positions) {
@@ -1010,17 +1276,6 @@ impl MeshWizardApp {
         let context_world = ui
             .input(|input| input.pointer.hover_pos())
             .map(|position| self.camera.screen_to_world(canvas, position));
-        background.context_menu(|ui| {
-            if ui.button(tr!("ui.canvas.add_host_here")).clicked() {
-                self.add_host_near(context_world);
-                ui.close();
-            }
-            ui.separator();
-            if ui.button(tr!("ui.top_bar.fit_view")).clicked() {
-                self.fit_pending = true;
-                ui.close();
-            }
-        });
 
         paint_grid(&painter, canvas, &self.camera, &colors);
 
@@ -1079,69 +1334,88 @@ impl MeshWizardApp {
                         .map(|host| host.id)
                 })
         };
-        let selected_hosts = self.selection.hosts().to_vec();
+        // Connections first so nodes sit on top of their endpoints. Sort so
+        // that connections touching a highlighted host are painted last, where
+        // they cannot be hidden by unrelated edges or their labels.
+        let mut connections: Vec<_> = self
+            .mesh
+            .connections
+            .iter()
+            .map(|connection| {
+                let highlighted =
+                    connection_is_highlighted(connection, &self.selection, hovered_host);
+                (connection, highlighted)
+            })
+            .collect();
+        connections.sort_by_key(|(_, highlighted)| *highlighted);
 
-        // Connections first so nodes sit on top of their endpoints. Paint
-        // highlighted connections in a second pass so they are brought to the
-        // front of the other edges.
+        let dim_connections =
+            matches!(self.selection, Selection::Hosts(ref ids) if !ids.is_empty());
         let mut label_rects: Vec<Rect> = node_rects.values().copied().collect();
         let mut clicked_connection: Option<(u64, u64)> = None;
-        for highlighted_pass in [false, true] {
-            for connection in &self.mesh.connections {
-                let (Some(from_rect), Some(to_rect)) = (
-                    node_rects.get(&connection.from),
-                    node_rects.get(&connection.to),
-                ) else {
-                    continue;
+        let mut double_clicked_connection: Option<(u64, u64)> = None;
+        let mut delete_connection_requested: Option<(u64, u64)> = None;
+        let mut disable_connection_requested: Option<(u64, u64)> = None;
+        for (connection, highlighted) in connections {
+            let (Some(from_rect), Some(to_rect)) = (
+                node_rects.get(&connection.from),
+                node_rects.get(&connection.to),
+            ) else {
+                continue;
+            };
+            let from_name = self
+                .mesh
+                .host(connection.from)
+                .map(|host| host.name.as_str())
+                .unwrap_or("?");
+            let to_name = self
+                .mesh
+                .host(connection.to)
+                .map(|host| host.name.as_str())
+                .unwrap_or("?");
+            let endpoint = self.mesh.resolved_endpoint(connection.from, connection.to);
+            let selected = self.selection
+                == Selection::Connection {
+                    from: connection.from,
+                    to: connection.to,
                 };
-                let from_name = self
-                    .mesh
-                    .host(connection.from)
-                    .map(|host| host.name.as_str())
-                    .unwrap_or("?");
-                let to_name = self
-                    .mesh
-                    .host(connection.to)
-                    .map(|host| host.name.as_str())
-                    .unwrap_or("?");
-                let endpoint = self.mesh.resolved_endpoint(connection.from, connection.to);
-                let selected = self.selection
-                    == Selection::Connection {
-                        from: connection.from,
-                        to: connection.to,
-                    };
-                let highlighted = selected
-                    || hovered_host == Some(connection.from)
-                    || hovered_host == Some(connection.to)
-                    || selected_hosts.contains(&connection.from)
-                    || selected_hosts.contains(&connection.to);
-                if highlighted != highlighted_pass {
-                    continue;
-                }
+            let dimmed = dim_connections && !highlighted;
 
-                if paint_connection(
-                    ui,
-                    &painter,
-                    *from_rect,
-                    *to_rect,
-                    from_name,
-                    to_name,
-                    endpoint.as_deref(),
-                    connection,
-                    selected,
-                    highlighted,
-                    zoom,
-                    &mut label_rects,
-                    &colors,
-                ) {
-                    clicked_connection = Some((connection.from, connection.to));
-                }
+            let interaction = paint_connection(
+                ui,
+                &painter,
+                *from_rect,
+                *to_rect,
+                from_name,
+                to_name,
+                endpoint.as_deref(),
+                connection,
+                selected,
+                highlighted,
+                dimmed,
+                zoom,
+                &mut label_rects,
+                &colors,
+            );
+            if interaction.clicked {
+                clicked_connection = Some((connection.from, connection.to));
+            }
+            if interaction.double_clicked {
+                double_clicked_connection = Some((connection.from, connection.to));
+            }
+            if interaction.delete_requested {
+                delete_connection_requested = Some((connection.from, connection.to));
+            }
+            if interaction.disable_requested {
+                disable_connection_requested = Some((connection.from, connection.to));
             }
         }
 
         // Nodes.
         let mut dragged_host: Option<(u64, Vec2)> = None;
         let mut clicked_host: Option<(u64, bool, bool)> = None;
+        let mut double_clicked_host: Option<u64> = None;
+        let mut delete_host_requested: Option<u64> = None;
         for host in &self.mesh.hosts {
             let Some(node_rect) = node_rects.get(&host.id).copied() else {
                 continue;
@@ -1176,6 +1450,15 @@ impl MeshWizardApp {
                 let toggle = modifiers.ctrl || modifiers.command;
                 clicked_host = Some((host.id, additive, toggle));
             }
+            if response.double_clicked() {
+                double_clicked_host = Some(host.id);
+            }
+            response.context_menu(|ui| {
+                if ui.button(tr!("ui.canvas.delete_host")).clicked() {
+                    delete_host_requested = Some(host.id);
+                    ui.close();
+                }
+            });
 
             let endpoint = if host.endpoint.trim().is_empty() {
                 tr!("ui.canvas.no_default_endpoint")
@@ -1193,6 +1476,20 @@ impl MeshWizardApp {
             ));
         }
 
+        if hovered_host.is_none() && !ui.ctx().any_popup_open() {
+            background.context_menu(|ui| {
+                if ui.button(tr!("ui.canvas.add_host_here")).clicked() {
+                    self.add_host_near(context_world);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(tr!("ui.top_bar.fit_view")).clicked() {
+                    self.fit_pending = true;
+                    ui.close();
+                }
+            });
+        }
+
         if let Some((from, to)) = clicked_connection {
             self.selection = Selection::Connection { from, to };
         }
@@ -1204,6 +1501,25 @@ impl MeshWizardApp {
             } else {
                 self.selection.add_host(id);
             }
+        }
+        if let Some((from, to)) = double_clicked_connection {
+            self.selection = Selection::Connection { from, to };
+            self.focus_request = Some(FocusRequest::ConnectionEndpoint { from, to });
+            ui.ctx().request_repaint();
+        }
+        if let Some(id) = double_clicked_host {
+            self.selection = Selection::Hosts(vec![id]);
+            self.focus_request = Some(FocusRequest::HostName(id));
+            ui.ctx().request_repaint();
+        }
+        if let Some((from, to)) = disable_connection_requested {
+            self.disable_connection(from, to);
+        }
+        if let Some((from, to)) = delete_connection_requested {
+            self.delete_connection(from, to);
+        }
+        if let Some(id) = delete_host_requested {
+            self.request_delete_host(id);
         }
 
         // Apply mutations after the immutable iteration. Dragging any host in a
@@ -1300,13 +1616,34 @@ impl eframe::App for MeshWizardApp {
             || self.delete_prompt.is_some()
             || ctx.memory(|memory| memory.top_modal_layer().is_some())
             || ctx.any_popup_open();
-        if !overlay_open
-            && !ctx.egui_wants_keyboard_input()
-            && ctx.input(|input| input.key_pressed(egui::Key::Delete))
-        {
-            let selected_hosts = self.selection.hosts().to_vec();
-            if !selected_hosts.is_empty() {
-                self.request_delete_hosts(selected_hosts);
+        if !overlay_open && !ctx.text_edit_focused() {
+            let (undo_pressed, redo_pressed) = ctx.input(|input| {
+                let modifiers = input.modifiers;
+                let command = modifiers.ctrl || modifiers.command;
+                let z = input.key_pressed(egui::Key::Z);
+                (
+                    command && z && !modifiers.shift,
+                    command && (input.key_pressed(egui::Key::Y) || (z && modifiers.shift)),
+                )
+            });
+            if redo_pressed {
+                self.redo();
+                ctx.request_repaint();
+            } else if undo_pressed {
+                self.undo();
+                ctx.request_repaint();
+            }
+
+            if ctx.input(|input| input.key_pressed(egui::Key::Delete)) {
+                match self.selection.clone() {
+                    Selection::Hosts(ids) if !ids.is_empty() => {
+                        self.request_delete_hosts(ids);
+                    }
+                    Selection::Connection { from, to } => {
+                        self.disable_connection(from, to);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -1318,6 +1655,15 @@ impl eframe::App for MeshWizardApp {
 
         if self.mesh.defaults.preshared_keys {
             self.mesh.sync_preshared_keys();
+        }
+        self.migrate_endpoint_ports(&ctx);
+
+        let history_committed = self.history.observe(&self.mesh, Instant::now());
+        if history_committed {
+            ctx.request_repaint();
+        }
+        if self.history.has_pending() {
+            ctx.request_repaint_after(HISTORY_GROUP_WINDOW);
         }
 
         self.maybe_save_settings(&ctx);
@@ -1352,6 +1698,84 @@ mod tests {
             assert!(center_x.abs() < 1.0, "{shape:?} center x {center_x}");
             assert!(center_y.abs() < 1.0, "{shape:?} center y {center_y}");
         }
+    }
+
+    #[test]
+    fn wider_spacing_spreads_out_compact_layouts() {
+        let compact = layout_positions(MeshShape::Cards, 9, 260.0, 148.0);
+        let roomy = layout_positions(MeshShape::Cards, 9, 360.0, 248.0);
+
+        let compact_step = compact[1].0 - compact[0].0;
+        let roomy_step = roomy[1].0 - roomy[0].0;
+        assert!(roomy_step > compact_step, "{roomy_step} <= {compact_step}");
+
+        let compact_row = compact[3].1 - compact[0].1;
+        let roomy_row = roomy[3].1 - roomy[0].1;
+        assert!(roomy_row > compact_row, "{roomy_row} <= {compact_row}");
+    }
+
+    #[test]
+    fn connections_to_highlighted_hosts_are_highlighted() {
+        let connection = crate::model::Connection {
+            from: 1,
+            to: 2,
+            enabled: true,
+            endpoint: String::new(),
+            preshared_key: String::new(),
+        };
+
+        assert!(connection_is_highlighted(
+            &connection,
+            &Selection::None,
+            Some(1)
+        ));
+        assert!(connection_is_highlighted(
+            &connection,
+            &Selection::None,
+            Some(2)
+        ));
+        assert!(connection_is_highlighted(
+            &connection,
+            &Selection::Hosts(vec![2]),
+            None
+        ));
+        assert!(connection_is_highlighted(
+            &connection,
+            &Selection::Connection { from: 1, to: 2 },
+            None
+        ));
+        assert!(!connection_is_highlighted(
+            &connection,
+            &Selection::Hosts(vec![3]),
+            Some(3)
+        ));
+    }
+
+    #[test]
+    fn history_groups_nearby_edits_and_can_undo_and_redo() {
+        let mut mesh = crate::model::Mesh::new();
+        let id = mesh.add_host("alpha".into(), 0.0, 0.0);
+        let original = mesh.clone();
+        let mut history = MeshHistory::new(&mesh);
+        let start = Instant::now();
+
+        mesh.host_mut(id).unwrap().name = "alpha-one".into();
+        assert!(!history.observe(&mesh, start));
+        mesh.host_mut(id).unwrap().name = "alpha-two".into();
+        assert!(!history.observe(&mesh, start + Duration::from_millis(100)));
+
+        assert!(history.can_undo());
+        assert!(history.undo.is_empty());
+        assert!(history.observe(&mesh, start + Duration::from_millis(1000)));
+        assert_eq!(history.undo.len(), 1);
+
+        assert!(history.undo(&mut mesh));
+        assert_eq!(mesh, original);
+        assert!(history.can_redo());
+
+        assert!(history.redo(&mut mesh));
+        assert_eq!(mesh.host(id).unwrap().name, "alpha-two");
+        assert!(!history.can_redo());
     }
 
     #[test]

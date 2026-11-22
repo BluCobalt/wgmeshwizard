@@ -32,6 +32,7 @@ locale = "system"  # system | en | ...
 
 [mesh_view]
 arrange_layout = "circle"  # circle | square | cards | rows
+arrange_spacing = 60.0     # gap in canvas units between node cards when arranging
 ```
 Invalid values are sanitized on load.
 
@@ -76,7 +77,7 @@ One row per host:
 | `Name` | Display name and configuration file stem |
 | `X`, `Y` | Canvas position in world coordinates |
 | `Address` | Interface address, e.g. `10.100.0.1/32` |
-| `Endpoint` | Default public endpoint, optionally with a port |
+| `Endpoint` | Default public endpoint. A port typed here is moved into `ListenPort` automatically |
 | `SSHTarget` | Optional `user@host:port` used by `deploy.sh` instead of `Endpoint` |
 | `ListenPort` | Override for the mesh default |
 | `PrivateKey` | Base64 X25519 private key |
@@ -163,7 +164,7 @@ records to `/etc/hosts` by default. Only the managed section is replaced:
 
 ```
 ### BEGIN WGMESHWIZARD HOSTS###
-172.30.0.1 virt-01 virt-01.example.tld
+10.100.0.1 alpha alpha.example.tld
 ### END WGMESHWIZARD HOSTS###
 ```
 

@@ -24,6 +24,24 @@ impl MeshWizardApp {
                     self.show_settings = true;
                     self.settings_just_opened = true;
                 }
+                let can_redo = self.can_redo();
+                if ui
+                    .add_enabled(can_redo, egui::Button::new(tr!("ui.top_bar.redo")))
+                    .on_hover_text(tr!("ui.top_bar.redo_shortcut"))
+                    .clicked()
+                {
+                    self.redo();
+                    ui.ctx().request_repaint();
+                }
+                let can_undo = self.can_undo();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new(tr!("ui.top_bar.undo")))
+                    .on_hover_text(tr!("ui.top_bar.undo_shortcut"))
+                    .clicked()
+                {
+                    self.undo();
+                    ui.ctx().request_repaint();
+                }
                 if self.has_unsaved_changes() {
                     ui.label(
                         RichText::new(tr!("ui.top_bar.unsaved_changes"))
@@ -65,6 +83,26 @@ impl MeshWizardApp {
             {
                 self.arrange_mesh();
             }
+            ui.label(tr!("ui.top_bar.arrange_spacing"));
+            let mut spacing = self.arrange_spacing;
+            if ui
+                .add_sized(
+                    [130.0, ui.spacing().interact_size.y],
+                    egui::Slider::new(
+                        &mut spacing,
+                        crate::settings::MIN_ARRANGE_SPACING..=crate::settings::MAX_ARRANGE_SPACING,
+                    )
+                    .step_by(5.0)
+                    .fixed_decimals(0)
+                    .suffix(" px"),
+                )
+                .on_hover_text(tr!("ui.top_bar.arrange_spacing_hover"))
+                .changed()
+            {
+                self.arrange_spacing = spacing;
+                self.queue_settings_save();
+                self.arrange_mesh();
+            }
             if ui
                 .button(tr!("ui.top_bar.export_configs"))
                 .on_hover_text(tr!("ui.top_bar.write_one_wg_quick_conf_per"))
@@ -104,6 +142,14 @@ impl MeshWizardApp {
             if self.status.is_empty() {
                 ui.label(RichText::new(tr!("ui.status_bar.ready")).color(dim_text(ui)));
             } else {
+                if let Some(timestamp) = &self.status_time {
+                    ui.label(
+                        RichText::new(format!("{timestamp}:"))
+                            .monospace()
+                            .small()
+                            .color(dim_text(ui)),
+                    );
+                }
                 let color = if self.status_is_error {
                     DANGER
                 } else {
@@ -568,6 +614,7 @@ impl MeshWizardApp {
         let suggested_address = self.mesh.suggest_address();
         let defaults = self.mesh.defaults.clone();
         let host_pos = self.mesh.host(id).map(|host| Vec2::new(host.x, host.y));
+        let focus_name = self.focus_request == Some(FocusRequest::HostName(id));
         let mut reveal = self.show_private_key;
         let mut show_config = self.show_config;
         let mut delete_requested = false;
@@ -592,19 +639,35 @@ impl MeshWizardApp {
             });
 
             ui.add_space(6.0);
-            egui::CollapsingHeader::new(tr!("ui.host_inspector.identity"))
-                .default_open(true)
-                .show(ui, |ui| {
+            let identity_id = egui::Id::unique(("host_identity_header", id));
+            let mut identity = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                identity_id,
+                true,
+            );
+            if focus_name {
+                identity.set_open(true);
+            }
+            identity
+                .show_header(ui, |ui| {
+                    ui.label(tr!("ui.host_inspector.identity"));
+                })
+                .body(|ui| {
                     egui::Grid::new(("host_identity_grid", id))
                         .num_columns(2)
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
                             ui.label(tr!("ui.host_inspector.name"));
-                            ui.add(
+                            let name_response = ui.add(
                                 TextEdit::singleline(&mut host.name)
+                                    .id(host_name_field_id(id))
                                     .desired_width(FIELD_WIDTH)
                                     .hint_text(tr!("ui.host_inspector.host_name")),
                             );
+                            if focus_name {
+                                name_response.request_focus();
+                                ui.scroll_to_rect(name_response.rect, Some(Align::Center));
+                            }
                             ui.end_row();
 
                             ui.label(tr!("ui.host_inspector.address"));
@@ -642,6 +705,7 @@ impl MeshWizardApp {
                                 ));
                             ui.add(
                                 TextEdit::singleline(&mut host.endpoint)
+                                    .id(host_endpoint_field_id(id))
                                     .desired_width(FIELD_WIDTH)
                                     .hint_text(tr!("ui.host_inspector.vpn_example_com_port")),
                             );
@@ -659,10 +723,12 @@ impl MeshWizardApp {
                             ui.end_row();
 
                             ui.label(tr!("ui.mesh_defaults_inspector.listen_port"));
+                            let inherited_listen_port =
+                                host.endpoint_port().or(defaults.listen_port);
                             optional_u16_cell(
                                 ui,
                                 &mut host.listen_port,
-                                defaults.listen_port,
+                                inherited_listen_port,
                                 DEFAULT_LISTEN_PORT,
                                 1..=65535,
                             );
@@ -844,6 +910,9 @@ impl MeshWizardApp {
 
         self.show_private_key = reveal;
         self.show_config = show_config;
+        if focus_name {
+            self.focus_request = None;
+        }
 
         if focus && let Some(position) = host_pos {
             self.camera.pan = position;
@@ -908,6 +977,8 @@ impl MeshWizardApp {
         let automatic = self.mesh.default_endpoint_for(to);
         let resolved = self.mesh.resolved_endpoint(from, to);
         let mesh_wide_psks = self.mesh.defaults.preshared_keys;
+        let focus_endpoint =
+            self.focus_request == Some(FocusRequest::ConnectionEndpoint { from, to });
         let mut reveal = self.show_private_key;
         let mut select_source = false;
         let mut select_target = false;
@@ -991,8 +1062,9 @@ impl MeshWizardApp {
                     ui.end_row();
 
                     ui.label(tr!("ui.connection_inspector.override"));
-                    ui.add(
+                    let endpoint_response = ui.add(
                         TextEdit::singleline(&mut connection.endpoint)
+                            .id(connection_endpoint_field_id(from, to))
                             .desired_width(FIELD_WIDTH)
                             .hint_text(
                                 automatic
@@ -1008,6 +1080,10 @@ impl MeshWizardApp {
                                     }),
                             ),
                     );
+                    if focus_endpoint {
+                        endpoint_response.request_focus();
+                        ui.scroll_to_rect(endpoint_response.rect, Some(Align::Center));
+                    }
                     ui.end_row();
 
                     ui.label(tr!("ui.connection_inspector.presharedkey"));
@@ -1105,6 +1181,9 @@ impl MeshWizardApp {
         }
 
         self.show_private_key = reveal;
+        if focus_endpoint {
+            self.focus_request = None;
+        }
         if mesh_wide_psks {
             let key = self
                 .mesh
@@ -1362,8 +1441,11 @@ impl MeshWizardApp {
         ui.label(tr!("ui.settings_general.drag_a_host_to_move_it"));
         ui.label(tr!("ui.settings_general.scroll_over_the_canvas_to_zoom"));
         ui.label(tr!("ui.settings_general.right_click_empty_canvas_space_to"));
+        ui.label(tr!("ui.settings_general.right_click_a_host_or_connection"));
+        ui.label(tr!("ui.settings_general.double_click_a_host_to_edit"));
         ui.label(tr!("ui.settings_general.the_canvas_centers_on_each_newly"));
         ui.label(tr!("ui.settings_general.press_delete_with_a_host_selected"));
+        ui.label(tr!("ui.settings_general.ctrl_z_and_ctrl_y"));
         ui.label(tr!("ui.settings_general.press_escape_to_clear_the_current"));
     }
 
@@ -1417,7 +1499,7 @@ impl MeshWizardApp {
                 ui.add_space(4.0);
                 ui.label(body);
                 ui.label(
-                    RichText::new(tr!("ui.delete_host_modal.this_cannot_be_undone")).color(DANGER),
+                    RichText::new(tr!("ui.delete_host_modal.this_can_be_undone")).color(DANGER),
                 );
                 ui.add_space(10.0);
                 ui.checkbox(
