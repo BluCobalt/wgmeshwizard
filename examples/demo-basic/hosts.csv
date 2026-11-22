@@ -1,0 +1,5 @@
+﻿"ID","Name","X","Y","Address","Endpoint","SSHTarget","ListenPort","PrivateKey","AllowedIPs","PersistentKeepalive","FwMark","DNS","MTU","Table","PreUp","PostUp","PreDown","PostDown","SaveConfig"
+"1","alpha","0.0","-286.5","10.100.0.1/32","203.0.113.10","","51820","sODGA38Dkej9HLMpVYngcvIgaJg1JvZKBrzC5c1pAVE=","","","","","","","","","","",""
+"2","bravo","286.5","0.0","10.100.0.2/32","203.0.113.20","","51821","8PwiQX7Pfb2FaVukQWADAfW7kfGmKWelKoh5HumgiXs=","","","","","","","","","","",""
+"3","charlie","0.0","286.5","10.100.0.3/32","203.0.113.30","","51822","sEk1XnlVz/z0gBrF+B+ywIjDSMYCM1r35fq3JgD1DkY=","10.40.0.0/16","","","","","","","","","",""
+"4","delta","-286.5","0.0","10.100.0.4/32","203.0.113.40","","51823","WBoDX0mqocCXLEdNDRQbgg+JREMxuyAqd7KGi+vUlVA=","","","","","","","","","","",""

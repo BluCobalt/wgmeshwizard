@@ -1,2 +1,0 @@
-﻿"MeshName","AddressPrefix","ListenPort","PersistentKeepalive","FwMark","DNS","MTU","Table","PreUp","PostUp","PreDown","PostDown","SaveConfig","AllowedIPs","PresharedKeys"
-"demo-mesh","10.100.0.0/24","51820","25","","1.1.1.1","","auto","","","","","","","false"

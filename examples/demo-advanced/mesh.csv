@@ -1,0 +1,2 @@
+﻿"Version","MeshName","AddressPrefix","ListenPort","PersistentKeepalive","FwMark","DNS","MTU","Table","PreUp","PostUp","PreDown","PostDown","SaveConfig","AllowedIPs","PresharedKeys","GenerateHostsFile","SearchDomain","EnableDeployment","SSHUser","SSHPort"
+"1","advanced-demo","10.42.0.0/24","51820","25","","10.42.0.53","1380","auto","","","","","false","","true","true","mesh.example.net","true","deploy","22"

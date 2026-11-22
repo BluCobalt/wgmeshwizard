@@ -36,6 +36,13 @@ arrange_spacing = 60.0     # gap in canvas units between node cards when arrangi
 ```
 Invalid values are sanitized on load.
 
+## Examples
+
+- `examples/demo-basic`: small 4-way mesh
+- `examples/demo-advanced`: big 9-way mesh that demonstrates endpoint variety,
+  ListenPort overrides, per-link overrides, disabled links, preshared keys,
+  deployment output, and host-specific options. See its [README](https://github.com/BluCobalt/wgmeshwizard/tree/master/examples/demo-advanced) for details.
+
 ## Project files
 
 When launched without a project path, the app prompts you to open an existing
@@ -113,15 +120,15 @@ When `GenerateHostsFile` is enabled, exporting also writes a file named
 `/etc/hosts`-compatible entry per host address:
 
 ```
-172.30.0.1 virt-01
-172.30.0.2 virt-02
+10.100.0.1 alpha
+10.100.0.2 bravo
 ```
 
 When `SearchDomain` is set, each host name also gets a fully qualified alias:
 
 ```
-172.30.0.1 virt-01 virt-01.example.tld
-172.30.0.2 virt-02 virt-02.example.tld
+10.100.0.1 alpha alpha.example.tld
+10.100.0.2 bravo bravo.example.tld
 ```
 
 Hosts without a parseable IP address are skipped. A host with several
@@ -169,6 +176,102 @@ records to `/etc/hosts` by default. Only the managed section is replaced:
 ```
 
 Existing `/etc/hosts` content outside those markers is preserved.
+
+Example output:
+```aiignore
+./deploy.sh --dry-run
+
+WireGuard Mesh Wizard deployment
+  Mesh:  advanced-demo
+  Hosts: 9
+  Mode:  dry run
+  /etc/hosts: will be updated
+
+[1/9] gateway
+     target: admin@gw.mesh.example.net:2222
+     tunnel: gateway (wg-quick@gateway.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/gateway.conf
+     would enable and restart wg-quick@gateway.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] gateway (dry run)
+
+[2/9] db-primary
+     target: deploy@203.0.113.21:22
+     tunnel: db-primary (wg-quick@db-primary.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/db-primary.conf
+     would enable and restart wg-quick@db-primary.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] db-primary (dry run)
+
+[3/9] db-replica
+     target: dba@203.0.113.22:2200
+     tunnel: db-replica (wg-quick@db-replica.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/db-replica.conf
+     would enable and restart wg-quick@db-replica.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] db-replica (dry run)
+
+[4/9] web-01
+     target: deploy@[2001:db8:42::41]:22
+     tunnel: web-01 (wg-quick@web-01.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/web-01.conf
+     would enable and restart wg-quick@web-01.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] web-01 (dry run)
+
+[5/9] web-02
+     target: deploy@[2001:db8:42::42]:22
+     tunnel: web-02 (wg-quick@web-02.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/web-02.conf
+     would enable and restart wg-quick@web-02.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] web-02 (dry run)
+
+[6/9] ops-laptop
+     target: deploy@ops.example.net:22
+     tunnel: ops-laptop (wg-quick@ops-laptop.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/ops-laptop.conf
+     would enable and restart wg-quick@ops-laptop.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] ops-laptop (dry run)
+
+[7/9] monitoring
+     target: deploy@203.0.113.70:22
+     tunnel: monitoring (wg-quick@monitoring.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/monitoring.conf
+     would enable and restart wg-quick@monitoring.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] monitoring (dry run)
+
+[8/9] branch-router
+     target: root@[2001:db8:99::8]:2222
+     tunnel: branch-router (wg-quick@branch-router.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/branch-router.conf
+     would enable and restart wg-quick@branch-router.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] branch-router (dry run)
+
+[9/9] backup
+     target: deploy@backup.example.net:22
+     tunnel: backup (wg-quick@backup.service)
+  -> Dry run: no changes will be made
+     would install /etc/wireguard/backup.conf
+     would enable and restart wg-quick@backup.service
+     would apply the WGMESHWIZARD hosts block to /etc/hosts
+[ OK ] backup (dry run)
+
+Deployment summary
+  [ OK ] 9 host(s) checked
+[ OK ] Dry run complete. No changes were made.
+```
 
 ## License
 This project is licensed under GPL-3-or-later.
