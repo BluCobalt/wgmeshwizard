@@ -327,8 +327,8 @@ pub(super) fn paint_connection(
     // Arrow head at the destination.
     let tangent = (end - ctrl2).normalized();
     if tangent.is_finite() {
-        let head_len = (8.0 * zoom).clamp(4.0, 14.0);
-        let head_width = (4.5 * zoom).clamp(2.0, 9.0);
+        let head_len = (12.0 * zoom).clamp(6.0, 20.0);
+        let head_width = (7.0 * zoom).clamp(3.0, 13.0);
         let base = end - tangent * head_len;
         painter.add(Shape::convex_polygon(
             vec![
