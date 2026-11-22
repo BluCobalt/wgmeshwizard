@@ -5,6 +5,7 @@ mod i18n;
 mod model;
 mod settings;
 mod storage;
+mod timestamp;
 mod wgconfig;
 
 rust_i18n::i18n!("res/i18n", fallback = "en");
