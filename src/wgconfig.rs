@@ -338,6 +338,22 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_port_changes_the_interface_listen_port() {
+        let (mut mesh, a, b) = demo_mesh();
+        {
+            let host = mesh.host_mut(b).unwrap();
+            host.endpoint = "203.0.113.20:12345".into();
+            host.listen_port = None;
+        }
+
+        let b_config = generate_host_config(&mesh, b).unwrap();
+        assert!(b_config.contains("ListenPort = 12345\n"));
+
+        let a_config = generate_host_config(&mesh, a).unwrap();
+        assert!(a_config.contains("Endpoint = 203.0.113.20:12345\n"));
+    }
+
+    #[test]
     fn generated_headers_include_a_timestamp() {
         let (mesh, a, _) = demo_mesh();
         let config = generate_host_config(&mesh, a).unwrap();

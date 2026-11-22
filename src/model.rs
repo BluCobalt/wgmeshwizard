@@ -97,8 +97,9 @@ pub struct Host {
     pub x: f32,
     pub y: f32,
     pub address: String,
-    /// Public endpoint other hosts can use by default.  A port may be
-    /// included; otherwise the host's effective listen port is appended.
+    /// Public endpoint other hosts can use by default.  A port may be typed
+    /// here as a convenience; it is moved into `listen_port` when the field is
+    /// left or the project is normalized.
     pub endpoint: String,
     /// Optional `user@host:port` destination used by the generated deploy
     /// script instead of the public endpoint.
@@ -146,8 +147,13 @@ impl Host {
         }
     }
 
+    pub fn endpoint_port(&self) -> Option<u16> {
+        endpoint_port(&self.endpoint)
+    }
+
     pub fn effective_listen_port(&self, defaults: &MeshDefaults) -> u16 {
         self.listen_port
+            .or_else(|| self.endpoint_port())
             .or(defaults.listen_port)
             .unwrap_or(DEFAULT_LISTEN_PORT)
     }
@@ -303,6 +309,28 @@ impl Mesh {
         before != self.hosts.len()
     }
 
+    /// Move explicit endpoint ports into each host's ListenPort override.
+    /// Returns true when any host was changed.
+    pub fn migrate_endpoint_ports(&mut self) -> bool {
+        let mut changed = false;
+        for host in &mut self.hosts {
+            if let Some((endpoint, port)) = split_endpoint_port(&host.endpoint) {
+                host.endpoint = endpoint.to_owned();
+                host.listen_port = Some(port);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Remove a single directed connection. Returns true when one was removed.
+    pub fn remove_connection(&mut self, from: u64, to: u64) -> bool {
+        let before = self.connections.len();
+        self.connections
+            .retain(|connection| connection.from != from || connection.to != to);
+        before != self.connections.len()
+    }
+
     /// Make sure the project is a full mesh and that ids / links are
     /// consistent.  Missing links are created enabled.  Returns true when the
     /// mesh was modified.
@@ -332,6 +360,7 @@ impl Mesh {
             changed = true;
         }
 
+        changed |= self.migrate_endpoint_ports();
         changed |= self.ensure_full_mesh();
         changed
     }
@@ -556,6 +585,35 @@ fn first_ipv4(address: &str) -> Option<u32> {
         .map(u32::from)
 }
 
+/// Split an endpoint such as `vpn.example.com:1234` or
+/// `[2001:db8::1]:1234` into its host part and explicit port. Bare IPv6
+/// addresses have no port.
+pub fn split_endpoint_port(endpoint: &str) -> Option<(&str, u16)> {
+    let endpoint = endpoint.trim();
+    let (host, port) = if let Some(rest) = endpoint.strip_prefix('[') {
+        let (_, tail) = rest.split_once(']')?;
+        let port = tail.strip_prefix(':')?;
+        let host_end = endpoint.len() - tail.len();
+        (&endpoint[..host_end], port)
+    } else if endpoint.matches(':').count() == 1 {
+        endpoint.rsplit_once(':')?
+    } else {
+        return None;
+    };
+
+    let port = port.trim();
+    if port.is_empty() || !port.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port > 0)?;
+    Some((host.trim_end(), port))
+}
+
+/// Extract an explicit port from an endpoint.
+pub fn endpoint_port(endpoint: &str) -> Option<u16> {
+    split_endpoint_port(endpoint).map(|(_, port)| port)
+}
+
 /// Append a port to an endpoint if it does not already have one.
 ///
 /// Bare IPv6 addresses are bracketed before the port is appended, matching the
@@ -626,6 +684,70 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_port_sets_the_effective_listen_port() {
+        let defaults = MeshDefaults::default();
+        let mut host = Host::empty(1, "alpha".into(), 0.0, 0.0);
+
+        host.endpoint = "vpn.example.com:1234".into();
+        assert_eq!(
+            split_endpoint_port(&host.endpoint),
+            Some(("vpn.example.com", 1234))
+        );
+        assert_eq!(host.endpoint_port(), Some(1234));
+        assert_eq!(host.effective_listen_port(&defaults), 1234);
+
+        host.endpoint = "[2001:db8::1]:4321".into();
+        assert_eq!(
+            split_endpoint_port(&host.endpoint),
+            Some(("[2001:db8::1]", 4321))
+        );
+        assert_eq!(host.endpoint_port(), Some(4321));
+        assert_eq!(host.effective_listen_port(&defaults), 4321);
+
+        host.endpoint = "2001:db8::1".into();
+        assert_eq!(host.endpoint_port(), None);
+        assert_eq!(host.effective_listen_port(&defaults), DEFAULT_LISTEN_PORT);
+
+        host.listen_port = Some(5555);
+        host.endpoint = "vpn.example.com:1234".into();
+        assert_eq!(host.effective_listen_port(&defaults), 5555);
+    }
+
+    #[test]
+    fn endpoint_ports_are_moved_to_the_listen_port_override() {
+        let mut mesh = Mesh::new();
+        let id = mesh.add_host("alpha".into(), 0.0, 0.0);
+
+        {
+            let host = mesh.host_mut(id).unwrap();
+            host.endpoint = "vpn.example.com:1234".into();
+            host.listen_port = None;
+        }
+        assert!(mesh.migrate_endpoint_ports());
+        let host = mesh.host(id).unwrap();
+        assert_eq!(host.endpoint, "vpn.example.com");
+        assert_eq!(host.listen_port, Some(1234));
+        assert!(!mesh.migrate_endpoint_ports());
+
+        {
+            let host = mesh.host_mut(id).unwrap();
+            host.endpoint = "[2001:db8::1]:4321".into();
+            host.listen_port = None;
+        }
+        assert!(mesh.migrate_endpoint_ports());
+        let host = mesh.host(id).unwrap();
+        assert_eq!(host.endpoint, "[2001:db8::1]");
+        assert_eq!(host.listen_port, Some(4321));
+
+        {
+            let host = mesh.host_mut(id).unwrap();
+            host.endpoint = "2001:db8::1".into();
+            host.listen_port = None;
+        }
+        assert!(!mesh.migrate_endpoint_ports());
+    }
+
+    #[test]
     fn full_mesh_is_created() {
         let mut mesh = Mesh::new();
         let a = mesh.add_host("a".into(), 0.0, 0.0);
@@ -637,6 +759,18 @@ mod tests {
         assert!(mesh.connection(b, a).is_some());
         assert!(mesh.connection(a, c).is_some());
         assert!(mesh.connection(b, c).is_some());
+    }
+
+    #[test]
+    fn a_single_connection_can_be_removed() {
+        let mut mesh = Mesh::new();
+        let a = mesh.add_host("a".into(), 0.0, 0.0);
+        let b = mesh.add_host("b".into(), 100.0, 0.0);
+
+        assert!(mesh.remove_connection(a, b));
+        assert!(mesh.connection(a, b).is_none());
+        assert!(mesh.connection(b, a).is_some());
+        assert!(!mesh.remove_connection(a, b));
     }
 
     #[test]
