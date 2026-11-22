@@ -1,0 +1,25 @@
+[package]
+name = "wgmeshwizard"
+version = "1.0.0"
+edition = "2024"
+description = "A gui editor for WireGuard mesh networks"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/blucobalt/wgmeshwizard"
+authors = ["BluCobalt <luke@blucobalt.dev>"]
+
+[dependencies]
+base64 = "0.22"
+csv = "1"
+eframe = { version = "0.37", features = ["persistence"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rust-i18n = "4"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "wayland"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = "0.18"
