@@ -484,10 +484,10 @@ mod tests {
         let script = fs::read_to_string(&path).unwrap();
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains(
-            "deploy_host 'alpha' 'root@10.0.0.5' '2222' 'alpha' <<'WGMESHWIZARD_CONFIG_0'"
+            "deploy_host 1 \"$host_name\" 'root@10.0.0.5' '2222' 'alpha' <<'WGMESHWIZARD_CONFIG_0'"
         ));
         assert!(script.contains(
-            "deploy_host 'bravo' 'deploy@203.0.113.20' '2200' 'bravo' <<'WGMESHWIZARD_CONFIG_1'"
+            "deploy_host 2 \"$host_name\" 'deploy@203.0.113.20' '2200' 'bravo' <<'WGMESHWIZARD_CONFIG_1'"
         ));
         assert!(script.contains(crate::deploy::HOSTS_BEGIN_MARKER));
         assert!(script.contains(crate::deploy::HOSTS_END_MARKER));

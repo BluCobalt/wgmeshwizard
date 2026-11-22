@@ -107,9 +107,13 @@ pub fn render_script(mesh_name: &str, hosts: &[HostScript], hosts_block: Option<
          INSTALL_MISSING=1\n\
          KEEP_GOING=1\n\
          HOSTS_AVAILABLE={}\n\
+         MESH_NAME={}\n\
+         TOTAL_HOSTS={}\n\
          HOSTS_BLOCK={}\n\n",
         if hosts_available { 1 } else { 0 },
         if hosts_available { 1 } else { 0 },
+        shell_quote(mesh_name),
+        hosts.len(),
         shell_quote(hosts_block.unwrap_or(""))
     ));
 
@@ -119,14 +123,24 @@ pub fn render_script(mesh_name: &str, hosts: &[HostScript], hosts_block: Option<
             .replace("@@HOSTS_END@@", HOSTS_END_MARKER),
     );
 
-    script.push_str("deployed=0\nfailed=0\n\n");
+    script.push_str(
+        "deployed=0\n\
+         failed=0\n\
+         attempted=0\n\
+         stopped=0\n\
+         failed_hosts=\n\n",
+    );
     for (index, host) in hosts.iter().enumerate() {
         let target = host.target.as_deref().unwrap_or("");
         let port = host.port.as_deref().unwrap_or("");
         let delimiter = heredoc_delimiter(index, &host.config);
         script.push_str(&format!(
-            "deploy_host {} {} {} {} <<'{}'\n",
+            "if [ \"$stopped\" -eq 0 ]; then\n\
+             host_name={}\n\
+             attempted=$((attempted + 1))\n\
+             deploy_host {} \"$host_name\" {} {} {} <<'{}'\n",
             shell_quote(&host.name),
+            index + 1,
             shell_quote(target),
             shell_quote(port),
             shell_quote(&host.tunnel),
@@ -142,21 +156,49 @@ pub fn render_script(mesh_name: &str, hosts: &[HostScript], hosts_block: Option<
             "status=$?\n\
              if [ \"$status\" -eq 0 ]; then\n\
                  deployed=$((deployed + 1))\n\
+                 if [ \"$DRY_RUN\" -eq 1 ]; then\n\
+                     ok_line \"$host_name (dry run)\"\n\
+                 else\n\
+                     ok_line \"$host_name\"\n\
+                 fi\n\
              else\n\
                  failed=$((failed + 1))\n\
-                 if [ \"$KEEP_GOING\" -eq 0 ]; then\n\
-                     exit 1\n\
+                 if [ -z \"$failed_hosts\" ]; then\n\
+                     failed_hosts=$host_name\n\
+                 else\n\
+                     failed_hosts=\"$failed_hosts, $host_name\"\n\
                  fi\n\
-             fi\n\n",
+                 fail_line \"$host_name\"\n\
+                 if [ \"$KEEP_GOING\" -eq 0 ]; then\n\
+                     printf '\\n%s[FAIL]%s Stopping after the first failure (--fail-fast).\\n' \"$RED\" \"$RESET\" >&2\n\
+                     stopped=1\n\
+                 fi\n\
+             fi\n\
+         fi\n\n",
         );
     }
 
     script.push_str(
-        "if [ \"$failed\" -ne 0 ]; then\n\
-             printf '%d host(s) failed, %d succeeded\\n' \"$failed\" \"$deployed\" >&2\n\
+        "printf '\\n%sDeployment summary%s\\n' \"$BOLD\" \"$RESET\"\n\
+         if [ \"$DRY_RUN\" -eq 1 ]; then\n\
+             printf '  %s[ OK ]%s %d host(s) checked\\n' \"$GREEN\" \"$RESET\" \"$deployed\"\n\
+         else\n\
+             printf '  %s[ OK ]%s %d host(s) succeeded\\n' \"$GREEN\" \"$RESET\" \"$deployed\"\n\
+         fi\n\
+         if [ \"$failed\" -ne 0 ]; then\n\
+             printf '  %s[FAIL]%s %d host(s) failed: %s\\n' \"$RED\" \"$RESET\" \"$failed\" \"$failed_hosts\" >&2\n\
+         fi\n\
+         if [ \"$attempted\" -lt \"$TOTAL_HOSTS\" ]; then\n\
+             printf '  %s[SKIP]%s %d host(s) not attempted\\n' \"$YELLOW\" \"$RESET\" \"$((TOTAL_HOSTS - attempted))\" >&2\n\
+         fi\n\
+         if [ \"$failed\" -ne 0 ]; then\n\
              exit 1\n\
          fi\n\
-         printf 'Deployed %d host(s).\\n' \"$deployed\"\n",
+         if [ \"$DRY_RUN\" -eq 1 ]; then\n\
+             printf '%s[ OK ]%s Dry run complete. No changes were made.\\n' \"$GREEN\" \"$RESET\"\n\
+         else\n\
+             printf '%s[ OK ]%s Deployment complete.\\n' \"$GREEN\" \"$RESET\"\n\
+         fi\n",
     );
     script
 }
@@ -271,7 +313,33 @@ fn format_target(user: Option<&str>, host: &str) -> String {
     }
 }
 
-const SCRIPT_BODY: &str = r##"usage() {
+const SCRIPT_BODY: &str = r##"# Use colour only for interactive terminals. NO_COLOR always wins.
+if [ -t 1 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    esc=$(printf '\033')
+    BOLD="${esc}[1m"
+    DIM="${esc}[2m"
+    GREEN="${esc}[32m"
+    RED="${esc}[31m"
+    YELLOW="${esc}[33m"
+    CYAN="${esc}[36m"
+    RESET="${esc}[0m"
+else
+    BOLD=''
+    DIM=''
+    GREEN=''
+    RED=''
+    YELLOW=''
+    CYAN=''
+    RESET=''
+fi
+
+ok_line() { printf '%s[ OK ]%s %s\n' "$GREEN" "$RESET" "$*"; }
+fail_line() { printf '%s[FAIL]%s %s\n' "$RED" "$RESET" "$*" >&2; }
+warn_line() { printf '%s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+step() { printf '  %s->%s %s\n' "$CYAN" "$RESET" "$*"; }
+detail() { printf '     %s\n' "$*"; }
+
+usage() {
     cat <<'WGMESHWIZARD_USAGE'
 Usage: ./deploy.sh [options]
 
@@ -282,6 +350,9 @@ Options:
   --no-install    Do not install missing wireguard-tools
   --fail-fast     Stop after the first failed host
   -h, --help      Show this help
+
+Environment:
+  NO_COLOR        Disable coloured output
 WGMESHWIZARD_USAGE
 }
 
@@ -292,7 +363,7 @@ while [ $# -gt 0 ]; do
             if [ "$HOSTS_AVAILABLE" -eq 1 ]; then
                 APPLY_HOSTS=1
             else
-                printf '%s\n' "--apply-hosts was given, but this mesh has no generated hosts block" >&2
+                warn_line "--apply-hosts was given, but this mesh has no generated hosts block."
                 APPLY_HOSTS=0
             fi
             ;;
@@ -304,7 +375,7 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            printf 'unknown option: %s\n' "$1" >&2
+            fail_line "Unknown option: $1"
             usage >&2
             exit 2
             ;;
@@ -488,58 +559,89 @@ WGMESHWIZARD_APPLY_HOSTS
 }
 
 deploy_host() (
-    name=$1
-    ssh_target=$2
-    ssh_port=$3
-    tunnel=$4
+    index=$1
+    name=$2
+    ssh_target=$3
+    ssh_port=$4
+    tunnel=$5
+
+    printf '\n%s[%s/%s]%s %s\n' "$BOLD" "$index" "$TOTAL_HOSTS" "$RESET" "$name"
 
     if [ -z "$ssh_target" ]; then
-        printf 'skip %s: no SSH target (set Endpoint or SSHTarget)\n' "$name" >&2
+        printf '  %sNo SSH target configured.%s Set Endpoint or SSHTarget for this host.\n' "$RED" "$RESET" >&2
         exit 1
     fi
 
-    config=$(mktemp "${TMPDIR:-/tmp}/wgmw-conf.XXXXXX") || exit 1
+    if [ -n "$ssh_port" ]; then
+        detail "target: $ssh_target:$ssh_port"
+    else
+        detail "target: $ssh_target"
+    fi
+    detail "tunnel: $tunnel (wg-quick@$tunnel.service)"
+
+    config=$(mktemp "${TMPDIR:-/tmp}/wgmw-conf.XXXXXX") || {
+        printf '  %sCould not create a temporary config file.%s\n' "$RED" "$RESET" >&2
+        exit 1
+    }
     trap 'rm -f "$config"' EXIT HUP INT TERM
     cat > "$config" || {
-        printf 'could not read embedded config for %s\n' "$name" >&2
+        printf '  %sCould not read the embedded config.%s\n' "$RED" "$RESET" >&2
         exit 1
     }
 
-    printf '\n== %s (%s) ==\n' "$name" "$ssh_target"
     if [ "$DRY_RUN" -eq 1 ]; then
-        printf '  would install /etc/wireguard/%s.conf and restart wg-quick@%s.service\n' "$tunnel" "$tunnel"
+        step "Dry run: no changes will be made"
+        detail "would install /etc/wireguard/$tunnel.conf"
+        detail "would enable and restart wg-quick@$tunnel.service"
         if [ "$APPLY_HOSTS" -eq 1 ]; then
-            printf '  would apply the WGMESHWIZARD hosts block to /etc/hosts\n'
+            detail "would apply the WGMESHWIZARD hosts block to /etc/hosts"
         fi
         exit 0
     fi
 
+    step "Checking wireguard-tools and systemd"
     if ! ensure_wireguard_tools; then
-        printf 'could not ensure wireguard-tools on %s\n' "$name" >&2
+        printf '  %sCould not prepare WireGuard on this host.%s\n' "$RED" "$RESET" >&2
         exit 1
     fi
 
     remote_tmp=/tmp/wgmeshwizard-${tunnel}-$$.conf
+    step "Uploading configuration"
     if ! remote "umask 077; cat > '$remote_tmp'" < "$config"; then
-        printf 'could not upload config for %s\n' "$name" >&2
+        printf '  %sCould not upload the configuration to %s.%s\n' "$RED" "$RESET" "$remote_tmp" >&2
         exit 1
     fi
 
+    step "Installing /etc/wireguard/$tunnel.conf"
     if ! install_config "$remote_tmp" "/etc/wireguard/$tunnel.conf"; then
-        printf 'could not install /etc/wireguard/%s.conf on %s\n' "$tunnel" "$name" >&2
+        printf '  %sCould not install /etc/wireguard/%s.conf.%s\n' "$RED" "$RESET" "$tunnel" >&2
         exit 1
     fi
 
+    step "Enabling and restarting wg-quick@$tunnel.service"
     if ! enable_service "wg-quick@$tunnel.service"; then
-        printf 'could not enable/restart wg-quick@%s.service on %s\n' "$tunnel" "$name" >&2
+        printf '  %sCould not enable or restart wg-quick@%s.service.%s\n' "$RED" "$RESET" "$tunnel" >&2
         exit 1
     fi
 
-    if ! apply_hosts; then
-        printf 'could not apply the hosts block on %s\n' "$name" >&2
-        exit 1
+    if [ "$APPLY_HOSTS" -eq 1 ]; then
+        step "Updating /etc/hosts"
+        if ! apply_hosts; then
+            printf '  %sCould not update /etc/hosts.%s\n' "$RED" "$RESET" >&2
+            exit 1
+        fi
     fi
 )
+
+printf '\n%sWireGuard Mesh Wizard deployment%s\n' "$BOLD" "$RESET"
+printf '  %sMesh:%s  %s\n' "$DIM" "$RESET" "$MESH_NAME"
+printf '  %sHosts:%s %s\n' "$DIM" "$RESET" "$TOTAL_HOSTS"
+if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  %sMode:%s  %sdry run%s\n' "$DIM" "$RESET" "$YELLOW" "$RESET"
+fi
+if [ "$APPLY_HOSTS" -eq 1 ]; then
+    printf '  %s/etc/hosts:%s will be updated\n' "$DIM" "$RESET"
+fi
 "##;
 
 #[cfg(test)]
@@ -633,11 +735,114 @@ mod tests {
         assert!(script.contains("HOSTS_AVAILABLE=1"));
         assert!(script.contains(HOSTS_BEGIN_MARKER));
         assert!(script.contains(HOSTS_END_MARKER));
-        assert!(script.contains("deploy_host 'alpha' 'root@203.0.113.10' '2222' 'alpha'"));
+        assert!(script.contains("host_name='alpha'"));
+        assert!(script.contains("deploy_host 1 \"$host_name\" 'root@203.0.113.10' '2222' 'alpha'"));
         assert!(script.contains("emerge --ask=n --oneshot wireguard-tools"));
         assert!(script.contains("HOSTS_BLOCK='10.0.0.1 alpha\n'"));
         assert!(
             script.contains("<<'WGMESHWIZARD_CONFIG_0'\nhello\nworld\nWGMESHWIZARD_CONFIG_0\n")
+        );
+        assert!(script.contains("[ OK ]"));
+        assert!(script.contains("[FAIL]"));
+        assert!(script.contains("Deployment summary"));
+        assert!(script.contains("NO_COLOR"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_script_reports_clear_pass_fail_output() {
+        use std::process::Command;
+
+        let hosts = vec![
+            HostScript {
+                name: "alpha".into(),
+                config: "hello\n".into(),
+                tunnel: "alpha".into(),
+                target: Some("root@203.0.113.10".into()),
+                port: None,
+            },
+            HostScript {
+                name: "broken".into(),
+                config: "hello\n".into(),
+                tunnel: "broken".into(),
+                target: None,
+                port: None,
+            },
+        ];
+        let script = render_script("lab", &hosts, None);
+        let path = std::env::temp_dir().join(format!(
+            "wgmeshwizard-deploy-output-{}.sh",
+            std::process::id()
+        ));
+        fs::write(&path, script).unwrap();
+
+        let output = Command::new("sh")
+            .arg(&path)
+            .arg("--dry-run")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("sh should be available");
+        let _ = fs::remove_file(&path);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stdout.contains("[ OK ] alpha (dry run)"), "{stdout}");
+        assert!(stderr.contains("[FAIL] broken"), "{stderr}");
+        assert!(stdout.contains("Deployment summary"), "{stdout}");
+        assert!(stderr.contains("1 host(s) failed"), "{stderr}");
+        assert!(
+            !stdout.contains('\u{1b}'),
+            "colour leaked into piped output"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fail_fast_skips_remaining_hosts_and_reports_them() {
+        use std::process::Command;
+
+        let hosts = vec![
+            HostScript {
+                name: "broken".into(),
+                config: "hello\n".into(),
+                tunnel: "broken".into(),
+                target: None,
+                port: None,
+            },
+            HostScript {
+                name: "alpha".into(),
+                config: "hello\n".into(),
+                tunnel: "alpha".into(),
+                target: Some("root@203.0.113.10".into()),
+                port: None,
+            },
+        ];
+        let script = render_script("lab", &hosts, None);
+        let path = std::env::temp_dir().join(format!(
+            "wgmeshwizard-deploy-fail-fast-{}.sh",
+            std::process::id()
+        ));
+        fs::write(&path, script).unwrap();
+
+        let output = Command::new("sh")
+            .arg(&path)
+            .arg("--dry-run")
+            .arg("--fail-fast")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("sh should be available");
+        let _ = fs::remove_file(&path);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(!stdout.contains("alpha"), "{stdout}");
+        assert!(stdout.contains("0 host(s) checked"), "{stdout}");
+        assert!(stderr.contains("1 host(s) not attempted"), "{stderr}");
+        assert!(
+            stderr.contains("Stopping after the first failure"),
+            "{stderr}"
         );
     }
 
